@@ -60,7 +60,7 @@ public final class CloseableChannel implements Closeable {
    */
   public InetSocketAddress address() {
     try {
-      return channel.address();
+      return (InetSocketAddress) channel.address();
     } catch (NoSuchMethodError e) {
       try {
         return (InetSocketAddress) channelAddressMethod.invoke(this.channel);

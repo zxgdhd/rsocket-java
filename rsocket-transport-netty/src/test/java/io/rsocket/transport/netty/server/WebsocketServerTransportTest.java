@@ -16,7 +16,6 @@
 
 package io.rsocket.transport.netty.server;
 
-import static io.rsocket.frame.FrameLengthCodec.FRAME_LENGTH_MASK;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
@@ -52,8 +51,7 @@ final class WebsocketServerTransportTest {
     captor.getValue().apply(httpServerRequest, httpServerResponse);
 
     Mockito.verify(httpServerResponse)
-        .sendWebsocket(
-            Mockito.nullable(String.class), Mockito.eq(FRAME_LENGTH_MASK), Mockito.any());
+        .sendWebsocket(Mockito.any(), Mockito.any());
   }
 
   @DisplayName("creates server with BindAddress")

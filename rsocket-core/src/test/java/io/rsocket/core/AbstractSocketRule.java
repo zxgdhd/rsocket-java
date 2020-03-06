@@ -19,8 +19,12 @@ package io.rsocket.core;
 import static io.rsocket.frame.FrameLengthCodec.FRAME_LENGTH_MASK;
 
 import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.ByteBufUtil;
+import io.netty.buffer.Unpooled;
 import io.rsocket.RSocket;
 import io.rsocket.buffer.LeaksTrackingByteBufAllocator;
+import io.rsocket.frame.FrameHeaderCodec;
+import io.rsocket.frame.FrameType;
 import io.rsocket.test.util.TestDuplexConnection;
 import io.rsocket.test.util.TestSubscriber;
 import org.junit.rules.ExternalResource;
@@ -29,6 +33,14 @@ import org.junit.runners.model.Statement;
 import org.reactivestreams.Subscriber;
 
 public abstract class AbstractSocketRule<T extends RSocket> extends ExternalResource {
+
+  public static void main(String[] args) {
+    FrameType frameType =
+        FrameHeaderCodec.frameType(
+            Unpooled.wrappedBuffer(ByteBufUtil.decodeHexDump("000000012840")));
+
+    frameType.toString();
+  }
 
   protected TestDuplexConnection connection;
   protected Subscriber<Void> connectSub;
@@ -42,7 +54,6 @@ public abstract class AbstractSocketRule<T extends RSocket> extends ExternalReso
       @Override
       public void evaluate() throws Throwable {
         allocator = LeaksTrackingByteBufAllocator.instrument(ByteBufAllocator.DEFAULT);
-        connection = new TestDuplexConnection(allocator);
         connectSub = TestSubscriber.create();
         init();
         base.evaluate();
@@ -51,6 +62,13 @@ public abstract class AbstractSocketRule<T extends RSocket> extends ExternalReso
   }
 
   protected void init() {
+    if (socket != null) {
+      socket.dispose();
+    }
+    if (connection != null) {
+      connection.dispose();
+    }
+    connection = new TestDuplexConnection(allocator);
     socket = newRSocket();
   }
 
