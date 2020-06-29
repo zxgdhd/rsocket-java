@@ -174,12 +174,7 @@ class RSocketResponder implements RSocket {
   @Override
   public Mono<Void> fireAndForget(Payload payload) {
     try {
-      if (leaseHandler.useLease()) {
-        return requestHandler.fireAndForget(payload);
-      } else {
-        payload.release();
-        return Mono.error(leaseHandler.leaseError());
-      }
+      return requestHandler.fireAndForget(payload);
     } catch (Throwable t) {
       return Mono.error(t);
     }
@@ -188,12 +183,7 @@ class RSocketResponder implements RSocket {
   @Override
   public Mono<Payload> requestResponse(Payload payload) {
     try {
-      if (leaseHandler.useLease()) {
-        return requestHandler.requestResponse(payload);
-      } else {
-        payload.release();
-        return Mono.error(leaseHandler.leaseError());
-      }
+      return requestHandler.requestResponse(payload);
     } catch (Throwable t) {
       return Mono.error(t);
     }
@@ -202,12 +192,7 @@ class RSocketResponder implements RSocket {
   @Override
   public Flux<Payload> requestStream(Payload payload) {
     try {
-      if (leaseHandler.useLease()) {
-        return requestHandler.requestStream(payload);
-      } else {
-        payload.release();
-        return Flux.error(leaseHandler.leaseError());
-      }
+      return requestHandler.requestStream(payload);
     } catch (Throwable t) {
       return Flux.error(t);
     }
@@ -216,11 +201,7 @@ class RSocketResponder implements RSocket {
   @Override
   public Flux<Payload> requestChannel(Publisher<Payload> payloads) {
     try {
-      if (leaseHandler.useLease()) {
-        return requestHandler.requestChannel(payloads);
-      } else {
-        return Flux.error(leaseHandler.leaseError());
-      }
+      return requestHandler.requestChannel(payloads);
     } catch (Throwable t) {
       return Flux.error(t);
     }
@@ -228,12 +209,7 @@ class RSocketResponder implements RSocket {
 
   private Flux<Payload> requestChannel(Payload payload, Publisher<Payload> payloads) {
     try {
-      if (leaseHandler.useLease()) {
-        return responderRSocket.requestChannel(payload, payloads);
-      } else {
-        payload.release();
-        return Flux.error(leaseHandler.leaseError());
-      }
+      return responderRSocket.requestChannel(payload, payloads);
     } catch (Throwable t) {
       return Flux.error(t);
     }
@@ -299,10 +275,10 @@ class RSocketResponder implements RSocket {
       FrameType frameType = FrameHeaderCodec.frameType(frame);
       switch (frameType) {
         case REQUEST_FNF:
-          handleFireAndForget(streamId, fireAndForget(payloadDecoder.apply(frame)));
+          handleFireAndForget(streamId, payloadDecoder.apply(frame));
           break;
         case REQUEST_RESPONSE:
-          handleRequestResponse(streamId, requestResponse(payloadDecoder.apply(frame)));
+          handleRequestResponse(streamId, payloadDecoder.apply(frame));
           break;
         case CANCEL:
           handleCancelFrame(streamId);
@@ -313,12 +289,12 @@ class RSocketResponder implements RSocket {
         case REQUEST_STREAM:
           long streamInitialRequestN = RequestStreamFrameCodec.initialRequestN(frame);
           Payload streamPayload = payloadDecoder.apply(frame);
-          handleStream(streamId, requestStream(streamPayload), streamInitialRequestN, null);
+          handleRequestStream(streamId, streamPayload, streamInitialRequestN);
           break;
         case REQUEST_CHANNEL:
           long channelInitialRequestN = RequestChannelFrameCodec.initialRequestN(frame);
           Payload channelPayload = payloadDecoder.apply(frame);
-          handleChannel(streamId, channelPayload, channelInitialRequestN);
+          handleRequestChannel(streamId, channelPayload, channelInitialRequestN);
           break;
         case METADATA_PUSH:
           handleMetadataPush(metadataPush(payloadDecoder.apply(frame)));
@@ -365,13 +341,15 @@ class RSocketResponder implements RSocket {
           }
           break;
         case SETUP:
-          handleError(streamId, new IllegalStateException("Setup frame received post setup."));
+          handleError(
+              streamId, new IllegalStateException("Setup frame received post setup."), false);
           break;
         case LEASE:
         default:
           handleError(
               streamId,
-              new IllegalStateException("ServerRSocket: Unexpected frame type: " + frameType));
+              new IllegalStateException("ServerRSocket: Unexpected frame type: " + frameType),
+              false);
           break;
       }
       ReferenceCountUtil.safeRelease(frame);
@@ -381,8 +359,19 @@ class RSocketResponder implements RSocket {
     }
   }
 
-  private void handleFireAndForget(int streamId, Mono<Void> result) {
-    result.subscribe(
+  private void handleFireAndForget(int streamId, Payload requestPayload) {
+
+    Mono<Void> response;
+    boolean leaseUsed;
+    if (leaseHandler.useLease(streamId, FrameType.REQUEST_FNF, requestPayload.sliceMetadata())) {
+      leaseUsed = true;
+      response = fireAndForget(requestPayload);
+    } else {
+      leaseUsed = false;
+      requestPayload.release();
+      response = Mono.error(leaseHandler.leaseError());
+    }
+    response.subscribe(
         new BaseSubscriber<Void>() {
           @Override
           protected void hookOnSubscribe(Subscription subscription) {
@@ -394,13 +383,31 @@ class RSocketResponder implements RSocket {
           protected void hookOnError(Throwable throwable) {}
 
           @Override
-          protected void hookFinally(SignalType type) {
+          protected void hookFinally(SignalType terminalSignal) {
             sendingSubscriptions.remove(streamId);
+
+            if (leaseUsed) {
+              // notify that stream is done
+              leaseHandler.releaseLease(streamId, terminalSignal);
+            }
           }
         });
   }
 
-  private void handleRequestResponse(int streamId, Mono<Payload> response) {
+  private void handleRequestResponse(int streamId, Payload requestPayload) {
+
+    Mono<Payload> response;
+    boolean leaseUsed;
+    if (leaseHandler.useLease(
+        streamId, FrameType.REQUEST_RESPONSE, requestPayload.sliceMetadata())) {
+      leaseUsed = true;
+      response = requestResponse(requestPayload);
+    } else {
+      leaseUsed = false;
+      requestPayload.release();
+      response = Mono.error(leaseHandler.leaseError());
+    }
+
     final BaseSubscriber<Payload> subscriber =
         new BaseSubscriber<Payload>() {
           private boolean isEmpty = true;
@@ -416,19 +423,24 @@ class RSocketResponder implements RSocket {
               cancel();
               final IllegalArgumentException t =
                   new IllegalArgumentException(INVALID_PAYLOAD_ERROR_MESSAGE);
-              handleError(streamId, t);
+              handleError(streamId, t, leaseUsed);
               return;
             }
 
             ByteBuf byteBuf =
                 PayloadFrameCodec.encodeNextCompleteReleasingPayload(allocator, streamId, payload);
             sendProcessor.onNext(byteBuf);
+
+            if (leaseUsed) {
+              // notify that stream is done
+              leaseHandler.releaseLease(streamId, SignalType.ON_COMPLETE);
+            }
           }
 
           @Override
           protected void hookOnError(Throwable throwable) {
             if (sendingSubscriptions.remove(streamId, this)) {
-              handleError(streamId, throwable);
+              handleError(streamId, throwable, leaseUsed);
             }
           }
 
@@ -437,6 +449,11 @@ class RSocketResponder implements RSocket {
             if (isEmpty) {
               if (sendingSubscriptions.remove(streamId, this)) {
                 sendProcessor.onNext(PayloadFrameCodec.encodeComplete(allocator, streamId));
+
+                if (leaseUsed) {
+                  // notify that stream is done
+                  leaseHandler.releaseLease(streamId, SignalType.ON_COMPLETE);
+                }
               }
             }
           }
@@ -446,11 +463,87 @@ class RSocketResponder implements RSocket {
     response.doOnDiscard(ReferenceCounted.class, DROPPED_ELEMENTS_CONSUMER).subscribe(subscriber);
   }
 
+  private void handleRequestStream(int streamId, Payload requestPayload, long initialRequestN) {
+
+    Flux<Payload> response;
+    boolean leaseUsed;
+    if (leaseHandler.useLease(streamId, FrameType.REQUEST_STREAM, requestPayload.sliceMetadata())) {
+      leaseUsed = true;
+      response = requestStream(requestPayload);
+    } else {
+      leaseUsed = false;
+      requestPayload.release();
+      response = Flux.error(leaseHandler.leaseError());
+    }
+
+    handleStream(streamId, response, initialRequestN, null, leaseUsed);
+  }
+
+  private void handleRequestChannel(int streamId, Payload requestPayload, long initialRequestN) {
+    if (leaseHandler.useLease(
+        streamId, FrameType.REQUEST_CHANNEL, requestPayload.sliceMetadata())) {
+      UnicastProcessor<Payload> frames = UnicastProcessor.create();
+      channelProcessors.put(streamId, frames);
+
+      Flux<Payload> payloads =
+          frames
+              .doOnRequest(
+                  new LongConsumer() {
+                    boolean first = true;
+
+                    @Override
+                    public void accept(long l) {
+                      long n;
+                      if (first) {
+                        first = false;
+                        n = l - 1L;
+                      } else {
+                        n = l;
+                      }
+                      if (n > 0) {
+                        sendProcessor.onNext(RequestNFrameCodec.encode(allocator, streamId, n));
+                      }
+                    }
+                  })
+              .doFinally(
+                  signalType -> {
+                    if (channelProcessors.remove(streamId, frames)) {
+                      if (signalType == SignalType.CANCEL) {
+                        sendProcessor.onNext(CancelFrameCodec.encode(allocator, streamId));
+                      } else if (signalType == SignalType.ON_ERROR) {
+                        Subscription subscription = sendingSubscriptions.remove(streamId);
+                        if (subscription != null) {
+                          subscription.cancel();
+                        }
+                      }
+                    }
+                  })
+              .doOnDiscard(ReferenceCounted.class, DROPPED_ELEMENTS_CONSUMER);
+
+      // not chained, as the payload should be enqueued in the Unicast processor before this method
+      // returns
+      // and any later payload can be processed
+      frames.onNext(requestPayload);
+
+      if (responderRSocket != null) {
+        handleStream(
+            streamId, requestChannel(requestPayload, payloads), initialRequestN, frames, true);
+      } else {
+        handleStream(streamId, requestChannel(payloads), initialRequestN, frames, true);
+      }
+    } else {
+      requestPayload.release();
+      handleStream(streamId, Flux.error(leaseHandler.leaseError()), initialRequestN, null, false);
+    }
+  }
+
   private void handleStream(
       int streamId,
       Flux<Payload> response,
       long initialRequestN,
-      @Nullable UnicastProcessor<Payload> requestChannel) {
+      @Nullable UnicastProcessor<Payload> requestChannel,
+      boolean leaseUsed) {
+
     final BaseSubscriber<Payload> subscriber =
         new BaseSubscriber<Payload>() {
 
@@ -495,13 +588,18 @@ class RSocketResponder implements RSocket {
               channelProcessors.remove(streamId, requestChannel);
             }
             cancel();
-            handleError(streamId, t);
+            handleError(streamId, t, leaseUsed);
           }
 
           @Override
           protected void hookOnComplete() {
             if (sendingSubscriptions.remove(streamId, this)) {
               sendProcessor.onNext(PayloadFrameCodec.encodeComplete(allocator, streamId));
+
+              if (leaseUsed) {
+                // notify that stream is done
+                leaseHandler.releaseLease(streamId, SignalType.ON_COMPLETE);
+              }
             }
           }
 
@@ -527,64 +625,13 @@ class RSocketResponder implements RSocket {
                 }
               }
 
-              handleError(streamId, throwable);
+              handleError(streamId, throwable, leaseUsed);
             }
           }
         };
 
     sendingSubscriptions.put(streamId, subscriber);
     response.doOnDiscard(ReferenceCounted.class, DROPPED_ELEMENTS_CONSUMER).subscribe(subscriber);
-  }
-
-  private void handleChannel(int streamId, Payload payload, long initialRequestN) {
-    UnicastProcessor<Payload> frames = UnicastProcessor.create();
-    channelProcessors.put(streamId, frames);
-
-    Flux<Payload> payloads =
-        frames
-            .doOnRequest(
-                new LongConsumer() {
-                  boolean first = true;
-
-                  @Override
-                  public void accept(long l) {
-                    long n;
-                    if (first) {
-                      first = false;
-                      n = l - 1L;
-                    } else {
-                      n = l;
-                    }
-                    if (n > 0) {
-                      sendProcessor.onNext(RequestNFrameCodec.encode(allocator, streamId, n));
-                    }
-                  }
-                })
-            .doFinally(
-                signalType -> {
-                  if (channelProcessors.remove(streamId, frames)) {
-                    if (signalType == SignalType.CANCEL) {
-                      sendProcessor.onNext(CancelFrameCodec.encode(allocator, streamId));
-                    } else if (signalType == SignalType.ON_ERROR) {
-                      Subscription subscription = sendingSubscriptions.remove(streamId);
-                      if (subscription != null) {
-                        subscription.cancel();
-                      }
-                    }
-                  }
-                })
-            .doOnDiscard(ReferenceCounted.class, DROPPED_ELEMENTS_CONSUMER);
-
-    // not chained, as the payload should be enqueued in the Unicast processor before this method
-    // returns
-    // and any later payload can be processed
-    frames.onNext(payload);
-
-    if (responderRSocket != null) {
-      handleStream(streamId, requestChannel(payload, payloads), initialRequestN, frames);
-    } else {
-      handleStream(streamId, requestChannel(payloads), initialRequestN, frames);
-    }
   }
 
   private void handleMetadataPush(Mono<Void> result) {
@@ -614,11 +661,19 @@ class RSocketResponder implements RSocket {
 
     if (subscription != null) {
       subscription.cancel();
+
+      // notify that stream is done
+      leaseHandler.releaseLease(streamId, SignalType.CANCEL);
     }
   }
 
-  private void handleError(int streamId, Throwable t) {
+  private void handleError(int streamId, Throwable t, boolean leaseUsed) {
     sendProcessor.onNext(ErrorFrameCodec.encode(allocator, streamId, t));
+
+    if (leaseUsed) {
+      // notify that stream is done
+      leaseHandler.releaseLease(streamId, SignalType.ON_ERROR);
+    }
   }
 
   private void handleRequestN(int streamId, ByteBuf frame) {

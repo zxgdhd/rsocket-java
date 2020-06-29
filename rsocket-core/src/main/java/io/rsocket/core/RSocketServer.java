@@ -34,6 +34,8 @@ import io.rsocket.frame.FrameHeaderCodec;
 import io.rsocket.frame.SetupFrameCodec;
 import io.rsocket.frame.decoder.PayloadDecoder;
 import io.rsocket.internal.ClientServerInputMultiplexer;
+import io.rsocket.lease.LeaseSender;
+import io.rsocket.lease.LeaseTracker;
 import io.rsocket.lease.Leases;
 import io.rsocket.lease.RequesterLeaseHandler;
 import io.rsocket.lease.ResponderLeaseHandler;
@@ -381,6 +383,7 @@ public final class RSocketServer {
     }
   }
 
+  @SuppressWarnings("unchecked")
   private Mono<Void> acceptSetup(
       ServerSetup serverSetup,
       ByteBuf setupFrame,
@@ -420,7 +423,7 @@ public final class RSocketServer {
           Leases<?> leases = leaseEnabled ? leasesSupplier.get() : null;
           RequesterLeaseHandler requesterLeaseHandler =
               leaseEnabled
-                  ? new RequesterLeaseHandler.Impl(SERVER_TAG, leases.receiver())
+                  ? new RequesterLeaseHandler.Impl(SERVER_TAG, leases.leaseReceiver())
                   : RequesterLeaseHandler.None;
 
           RSocket rSocketRequester =
@@ -454,7 +457,10 @@ public final class RSocketServer {
                     ResponderLeaseHandler responderLeaseHandler =
                         leaseEnabled
                             ? new ResponderLeaseHandler.Impl<>(
-                                SERVER_TAG, connection.alloc(), leases.sender(), leases.stats())
+                                SERVER_TAG,
+                                connection.alloc(),
+                                (LeaseSender<LeaseTracker>) leases.leaseSender(),
+                                leases.leaseTracker())
                             : ResponderLeaseHandler.None;
 
                     RSocket rSocketResponder =

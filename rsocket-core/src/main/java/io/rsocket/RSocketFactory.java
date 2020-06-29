@@ -22,7 +22,6 @@ import io.rsocket.core.RSocketConnector;
 import io.rsocket.core.RSocketServer;
 import io.rsocket.core.Resume;
 import io.rsocket.frame.decoder.PayloadDecoder;
-import io.rsocket.lease.LeaseStats;
 import io.rsocket.lease.Leases;
 import io.rsocket.plugins.DuplexConnectionInterceptor;
 import io.rsocket.plugins.RSocketInterceptor;
@@ -230,7 +229,7 @@ public final class RSocketFactory {
       return this;
     }
 
-    public ClientRSocketFactory lease(Supplier<Leases<? extends LeaseStats>> supplier) {
+    public ClientRSocketFactory lease(Supplier<Leases<?>> supplier) {
       connector.lease(supplier);
       return this;
     }

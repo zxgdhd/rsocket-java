@@ -30,7 +30,8 @@ import io.rsocket.frame.SetupFrameCodec;
 import io.rsocket.frame.decoder.PayloadDecoder;
 import io.rsocket.internal.ClientServerInputMultiplexer;
 import io.rsocket.keepalive.KeepAliveHandler;
-import io.rsocket.lease.LeaseStats;
+import io.rsocket.lease.LeaseSender;
+import io.rsocket.lease.LeaseTracker;
 import io.rsocket.lease.Leases;
 import io.rsocket.lease.RequesterLeaseHandler;
 import io.rsocket.lease.ResponderLeaseHandler;
@@ -410,7 +411,7 @@ public class RSocketConnector {
    * @see <a href="https://github.com/rsocket/rsocket/blob/master/Protocol.md#lease-semantics">Lease
    *     Semantics</a>
    */
-  public RSocketConnector lease(Supplier<Leases<? extends LeaseStats>> supplier) {
+  public RSocketConnector lease(Supplier<Leases<?>> supplier) {
     this.leasesSupplier = supplier;
     return this;
   }
@@ -510,6 +511,7 @@ public class RSocketConnector {
    * @param transportSupplier supplier for the transport to connect with
    * @return a {@code Mono} with the connected RSocket
    */
+  @SuppressWarnings("unchecked")
   public Mono<RSocket> connect(Supplier<ClientTransport> transportSupplier) {
 
     return Mono.fromSupplier(transportSupplier)
@@ -575,10 +577,11 @@ public class RSocketConnector {
                             new ClientServerInputMultiplexer(wrappedConnection, interceptors, true);
 
                         boolean leaseEnabled = leasesSupplier != null;
-                        Leases<?> leases = leaseEnabled ? leasesSupplier.get() : null;
+                        Leases<? extends LeaseTracker> leases =
+                            leaseEnabled ? leasesSupplier.get() : null;
                         RequesterLeaseHandler requesterLeaseHandler =
                             leaseEnabled
-                                ? new RequesterLeaseHandler.Impl(CLIENT_TAG, leases.receiver())
+                                ? new RequesterLeaseHandler.Impl(CLIENT_TAG, leases.leaseReceiver())
                                 : RequesterLeaseHandler.None;
 
                         RSocket rSocketRequester =
@@ -629,8 +632,8 @@ public class RSocketConnector {
                                           ? new ResponderLeaseHandler.Impl<>(
                                               CLIENT_TAG,
                                               wrappedConnection.alloc(),
-                                              leases.sender(),
-                                              leases.stats())
+                                              (LeaseSender<LeaseTracker>) leases.leaseSender(),
+                                              leases.leaseTracker())
                                           : ResponderLeaseHandler.None;
 
                                   RSocket rSocketResponder =
